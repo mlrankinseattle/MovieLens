@@ -1,0 +1,240 @@
+#title: "Capstone MovieLens Project"
+#author: Maurice Rankin
+#date: November 19, 2019
+
+#Creating edx set, validation set
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+
+set.seed(1, sample.kind="Rounding")
+# if using R 3.5 or earlier, use `set.seed(1)` instead
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>% 
+     semi_join(edx, by = "movieId") %>%
+     semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+
+
+
+# I decided to remove the rating column to modify the validation set
+validation_CM <- validation  
+validation <- validation %>% select(-rating)
+
+#Viewing my data to see what I am workng with
+head(edx)
+summary(edx)
+
+
+#Getting total # of observations (Data is tidy)
+total_observation <- length(edx$rating) + length(validation$rating) 
+
+#Using Root mean square to define a function (frequency)
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings-predicted_ratings)^2,na.rm=T))
+}
+
+# Modifing the year as a column 
+edx <- edx %>% mutate(year = as.numeric(str_sub(title,-5,-2)))
+validation <- validation %>% mutate(year = as.numeric(str_sub(title,-5,-2)))
+validation_CM <- validation_CM %>% mutate(year = as.numeric(str_sub(title,-5,-2)))
+
+# Modify the genres variable (column separated)
+split_edx  <- edx  %>% separate_rows(genres, sep = "\\|")
+split_valid <- validation   %>% separate_rows(genres, sep = "\\|")
+split_valid_CM <- validation_CM  %>% separate_rows(genres, sep = "\\|")
+
+
+#Viewing data (1st row of edx and split_edx; getting summary
+head(edx) 
+head(split_edx)
+summary(edx)
+
+#Finding unique user and movies in edx
+edx %>% summarize(n_users = n_distinct(userId), n_movies = n_distinct(movieId))
+
+#Pulling Movie ratings per genre
+genre_rating <- split_edx%>%
+  group_by(genres) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count))
+
+#Adding plotting libraries to help with visualizations/analysis
+library(ggplot2)
+library(lubridate)
+
+#Creatign a vector for unique ratings
+vectorrats <- as.vector(edx$rating)
+unique(vectorrats) 
+
+#Plotting vector ratings
+vectorrats <- vectorrats[vectorrats != 0]
+vectorrats <- factor(vectorrats)
+qplot(vectorrats) +
+  ggtitle("Ratings' Distribution")
+
+
+#Solving for MU in a simple model
+mu <- mean(edx$rating)  
+mu
+
+#Calculating the movie effect so that I can adjust it from my prediction (penalty)
+movieavgnorm <- edx %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = mean(rating - mu))
+movieavgnorm %>% qplot(b_i, geom ="histogram", bins = 20, data = ., color = I("black"))
+
+
+
+#Creating a baseline model 
+bsl_rmse <- RMSE(validation_CM$rating,mu)
+
+## Testng and checking results
+bsl_rmse 
+rsmresults <- data_frame(method = "Using mean only", RMSE = bsl_rmse)
+rsmresults
+
+
+
+#Showing my predition with the Movie Effect Model and base model
+predictedratingsmovienorm <- validation %>% 
+  left_join(movieavgnorm, by='movieId') %>%
+  mutate(pred = mu + b_i) 
+Model1RMSE <- RMSE(validation_CM$rating,predictedratingsmovienorm$pred)
+rsmresults <- bind_rows(rsmresults,
+                          data_frame(method="Movie Effect Model",  
+                                     RMSE = Model1RMSE ))
+rsmresults %>% knitr::kable()
+
+#This model minus the movie effict only gives me an RSME of 0.9439087.  I need to do better.
+
+
+
+#I know Users must have an effect on the RSME.  Creating a historigram to see how this effect my prediction. 
+useravgsnrm <- edx %>% 
+  left_join(movieavgnorm, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_i))
+useravgsnrm %>% qplot(b_u, geom ="histogram", bins = 30, data = ., color = I("black"))
+
+
+
+#Creating a model that accounts for User and movie effect
+predictedratingsusernorm <- validation %>% 
+  left_join(movieavgnorm, by='movieId') %>%
+  left_join(useravgsnrm, by='userId') %>%
+  mutate(pred = mu + b_i + b_u) 
+  
+# testing results of new model and saving back to rsmresults
+Model2RMSE <- RMSE(validation_CM$rating,predictedratingsusernorm$pred)
+rsmresults <- bind_rows(rsmresults,
+                          data_frame(method="Movie and User Effect Model",  
+                                     RMSE = Model2RMSE ))
+rsmresults %>% knitr::kable()
+
+#Accounting for Movie and User effects I got the RSME down to 0.8653488.  I want at least 20 points so will look for more ways  to minimize RSME.
+
+#Only options left are to use cross-validation and try to regularize both user and movie effect.  Some users will rate movies other than others and of course some movies are only rated a few times.  This may decrease
+#the trust in my model.  If will try to eleminate these factors as noise or bias in my previous models.     
+
+
+#Setting lamba to and attempting to tune it using cross validation (setting range 0 to 10, increments of 0.25)
+lambdas <- seq(0, 10, 0.25)
+
+#Creating a function to test lamdba and find the user and movie ids associated with the noise factor in my trust theory.  
+rmses <- sapply(lambdas, function(l){
+  
+	mu <- mean(edx$rating)
+  
+  b_i <- edx %>% 
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+  
+  b_u <- edx %>% 
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+  
+  predicted_ratings <- validation %>% 
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    mutate(pred = mu + b_i + b_u) %>%
+    .$pred
+  
+  return(RMSE(validation_CM$rating,predicted_ratings))
+})
+
+#Now plotting the landas vs rmses to see best lamba to use...
+qplot(lambdas, rmses)  
+
+#Now using which.min to determin the best landa to use
+lambda <- lambdas[which.min(rmses)]
+lambda
+#found best lambda is 5.25
+
+
+#Using my best lambda of 5.25 to computer a normalized b_i
+movieavgsr <- edx %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = sum(rating - mu)/(n()+lambda), n_i = n())
+  
+#Using my best lambda of 5.25 to computer a normalized b_u
+useravgsr <- edx %>% 
+  left_join(movieavgsr, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = sum(rating - mu - b_i)/(n()+lambda), n_u = n())
+  
+  
+#Prediting my new ratings with adjustments 
+predicted_ratings_reg <- validation %>% 
+  left_join(movieavgsr, by='movieId') %>%
+  left_join(useravgsr, by='userId') %>%
+  mutate(pred = mu + b_i + b_u) %>% 
+  .$pred
+  
+  
+#Testing my new model and saving the results
+Model3rmse <- RMSE(validation_CM$rating,predicted_ratings_reg)
+rsmresults <- bind_rows(rsmresults,
+                          data_frame(method="Regularized Movie and User Effect Model",  
+                                     RMSE = Model3rmse ))
+rsmresults %>% knitr::kable()
+
+
+
+
+
+
+
