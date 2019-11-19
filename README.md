@@ -1,2 +1,0 @@
-# MovieLens
-Data Science: Capstone
